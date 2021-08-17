@@ -1,0 +1,814 @@
+---
+title: 'Análise Processo Seletivo Moat Capital'
+author: "Augusto D'Arruda"
+date: "8/15/2021"
+output: 
+  html_document:
+    code_folding: hide
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(warning = F)
+knitr::opts_chunk$set(message = F)
+```
+
+# Análise produção de Ovos de Galinha
+
+# Ferramentas Utilizadas
+
+As ferramentas utilizadas para a análise foram:
+
+-  Python (Extração dos Dados)
+-  R (Processamento dos dados, Análise Estatísticas, Relatório)
+-  PowerBI (Visualização de algumas análises)
+
+O arquivo .HTML permite que o leitor escolha se quer ou não olhar o código que produziu o output.
+
+
+-  [Código Github](https://github.com/augustodarruda/producao_ovo_galinha)
+-  [Dasboard PowerBI](https://app.powerbi.com/view?r=eyJrIjoiM2NkMGYzNDAtYzViZC00MTdkLWIxNjAtMTcwMGIyODhlMzlhIiwidCI6ImI0NzQxYTgyLTZiNmUtNDNhNS1hZDZlLTEwNDQ1MTFhYWVkNiJ9)
+
+
+
+# Baixando os dados na API usando Python
+
+Foi utilizado o Google Colab para utilizar o Python e fazer a extração dos dados via API O notebook com o código se encontra [neste código do Google Colab](https://colab.research.google.com/drive/1RyulgvgLuBcAafIHPnuNJTqTXBbpJYD3?usp=sharing)
+
+Abaixo segue o código usado para fazer a extração:
+```python
+    import sidrapy
+    import pandas as pd
+
+    df = sidrapy.get_table(table_code="915", period = "201501-202101",variable="1988,29,9588", territorial_level = "3",ibge_territorial_code = "all")
+
+    # Primeira linha como cabecalho
+    headers = df.iloc[0]
+    new_df  = pd.DataFrame(df.values[1:], columns=headers)
+
+    # Salvando em .csv
+    new_df.to_csv('tabela915.csv')
+```    
+    
+# Carregando bibliotecas do R
+
+```{r}
+library(readr) # leitura dos dados
+library(tidyverse) # data manipulation
+library(zoo) # séries temporais
+library(lubridate) # manipular datas
+library(ggplot2) # visualização
+library(scales) # extensão para escalas
+library(kableExtra) # tabelas
+library(ggstatsplot) # boxplots
+library(fable) # séries temporais
+library(tsibble) # séries temporais
+library(timetk) # séries temporais
+```
+
+# Leitura dos dados
+
+```{r}
+# leitura dos dados
+df <- read_csv("tabela915.csv", skip = 1)
+```
+
+# Limpeza dos dados
+
+```{r}
+# Selecionando colunas
+df <- 
+  df |> 
+  select(Valor,`Unidade da Federação`,Trimestre,Variável)
+
+# Transformando em NA caracteres nulos
+df[df == "..."] <- NA
+df[df == "X"] <- NA 
+
+# Pivot Wider para dados ficarem Tidy
+df <- 
+  df |> 
+  pivot_wider(names_from = Variável, values_from = Valor)
+
+# Renomeando colunas
+colnames(df)[1] <- "uf"
+colnames(df)[2] <- "trimestre"
+colnames(df)[3] <- "galinhas"
+colnames(df)[4] <- "qt_ovo"
+colnames(df)[5] <- "qt_ovo_cons"
+
+## Criando colunas:  ano, trim, regiao
+
+### Regiões do Brasil
+norte <- c("Amazonas","Pará","Acre","Rondônia","Roraima","Amapá","Tocantins")
+nordeste <- c("Maranhão","Piauí","Ceará","Rio Grande do Norte","Paraíba","Pernambuco","Alagoas","Sergipe","Bahia")
+centrooeste <- c("Mato Grosso","Mato Grosso do Sul","Goiás","Distrito Federal")
+sudeste <- c("Minas Gerais","São Paulo","Rio de Janeiro","Espírito Santo")
+sul <- c("Paraná","Santa Catarina","Rio Grande do Sul")
+
+### ano, regiao, trim
+df <-
+  df |> 
+  mutate(
+    ano = case_when(grepl("2015",trimestre) ~ "2015",
+                    grepl("2016",trimestre) ~ "2016",
+                    grepl("2017",trimestre) ~ "2017",
+                    grepl("2018",trimestre) ~ "2018",
+                    grepl("2019",trimestre) ~ "2019",
+                    grepl("2020",trimestre) ~ "2020",
+                    grepl("2021",trimestre) ~ "2021"),
+    trim = case_when(grepl("1º",trimestre) ~ "1",
+                     grepl("2º",trimestre) ~ "2",
+                     grepl("3º",trimestre) ~ "3",
+                     grepl("4º",trimestre) ~ "4"),
+    regiao = case_when(uf %in% norte ~ "Norte",
+                       uf %in% nordeste  ~ "Nordeste",
+                       uf %in% centrooeste ~ "Centro-Oeste",
+                       uf %in% sudeste ~ "Sudeste",
+                       uf %in% sul ~ "Sul",
+                       uf == "Brasil" ~ "Brasil")) |> 
+  relocate(ano, .after = trimestre) |> # realocando colunas
+  relocate(trim, .before = ano) |> 
+  relocate(regiao, .before = uf)
+
+## Colunas Factor e Numericas
+
+tofactor <- c("regiao","uf","trimestre","trim","ano")
+df[tofactor] <- lapply(df[tofactor], factor)
+tonum <- c("qt_ovo_cons","galinhas","qt_ovo")
+df[tonum] <- lapply(df[tonum], as.integer)
+df$data <- lubridate::ymd(df$ano, truncated = 2)
+
+## Sumarizando por região
+df <-
+  df |> 
+  group_by(regiao,ano,trim,trimestre,data) |> 
+  summarise(across(where(is.numeric),sum, na.rm = T))
+
+## Adicionando ano_trim
+df <-
+  df |> 
+  unite(ano_trim,ano,trim,sep="-",remove = F)
+
+df$data <-as.Date(as.yearqtr(df$ano_trim, format = "%Y-%q"))
+
+```
+
+# Evolução das variáveis
+
+Nos gráficos a seguir, temos duas linhas para cada Região, isso acontece pois como os dados são trimestrais, há uma linha reta que liga os dois trimestres. Sendo assim, foi feita uma linha que suaviza os 'steps' trimestrais.
+
+## Quantidade de Galinhas
+
+```{r fig.height=4,fig.width=8}
+df %>%
+  filter(!(regiao %in% "Brasil")) %>%
+  ggplot() +
+  aes(x = data , y = galinhas/1000000, colour = regiao) +
+  geom_line(size = 0.7) +
+  scale_y_continuous(labels = label_number(suffix = "M"),
+                     breaks = seq(0,90,10)) +
+  scale_x_date(date_breaks = "1 year", date_labels = "%Y") +
+  stat_smooth(size = 1.5, show.legend = F, se = F) +
+  labs(
+    x = "Ano",
+    y = "Quantidade de Galinhas Poedeiras",
+    color = "Região"
+  ) +
+  theme_minimal()
+```
+
+### Gráfico Interativo: Quantidade de Galinhas Poedeiras
+
+```{r}
+df %>% 
+  group_by(regiao) |> 
+  plot_time_series(data, galinhas,
+                   .facet_collapse = FALSE,
+                   .facet_ncol   = 3,
+                   .interactive = T)
+```
+
+## Quantidade de Ovos em Dúzias
+
+```{r fig.height=4,fig.width=8}
+df %>%
+  filter(!(regiao %in% "Brasil")) %>%
+  ggplot() +
+  aes(x = data, y = qt_ovo/1000, colour = regiao) +
+  geom_line(size = 0.7) +
+  scale_x_date(date_breaks = "1 year") +
+  stat_smooth(size = 1.5, show.legend = F, se = F) +
+  scale_y_continuous(labels = label_number(suffix = "M")) +
+  labs(
+    x = "Ano",
+    y = "Quantidade de Ovos em Dúzias",
+    color = "Região"
+  ) +
+  theme_minimal()
+```
+
+### Gráfico Interativo: Quantidade de Ovos (Mil Dúzias)
+
+```{r}
+df %>% 
+  group_by(regiao) |> 
+  plot_time_series(data, qt_ovo,
+                   .facet_collapse = FALSE,
+                   .facet_ncol   = 3,
+                   .interactive = T)
+```
+
+## Quantidade de Ovos de Consumo em Dúzias
+
+```{r fig.height=4,fig.width=8}
+df %>%
+  filter(!(regiao %in% "Brasil") & data >= "2018-01-01") %>%
+  ggplot() +
+  aes(x = data, y = qt_ovo_cons/1000, colour = regiao) +
+  geom_line(size = 0.7) +
+  scale_x_date(date_breaks = "1 year") +
+  stat_smooth(size = 1.5, show.legend = F, se = F) +
+  scale_y_continuous(labels = label_number(suffix = "K")) +
+  labs(
+    x = "Ano",
+    y = "Quantidade de Ovos para consumo em Dúzias",
+    color = "Região"
+  ) +
+  theme_minimal()
+```
+
+### Gráfico Interativo: Quantidade de Ovo para Consumo
+
+```{r}
+df %>% 
+  filter(data >="2018-01-01") |>
+  group_by(regiao) |> 
+  plot_time_series(data, qt_ovo_cons,
+                   .facet_collapse = FALSE,
+                   .facet_ncol   = 3,
+                   .interactive = T)
+```
+
+# Código crescimento percentual por Trimestre
+
+```{r}
+# Diferença Absoluta por Trimestre
+df <- 
+  df |> 
+  group_by(regiao) |> 
+  mutate(trim_dif_poed = galinhas - lag(galinhas),
+         trim_dif_ovo = qt_ovo - lag(qt_ovo),
+         trim_dif_ovocons = qt_ovo_cons - lag(qt_ovo_cons))
+
+# Taxa de crescimento em porcentagem
+df <-
+  df |> 
+  group_by(regiao) |> 
+  mutate(
+    dif_pct_gal = (trim_dif_poed/lag(galinhas))*100,
+    dif_pct_ovo = (trim_dif_ovo/lag(qt_ovo)*100),
+    dif_pct_ovocons = (trim_dif_ovocons / lag(qt_ovo_cons)*100))
+
+# Boolean para cor da barra
+df <-
+  df |> 
+  mutate(pos_gal = dif_pct_gal >= 0,
+         pos_ovo = dif_pct_ovo >= 0,
+         pos_ovocons = dif_pct_ovocons >=0)
+```
+
+## Tabela da média de crescimento para cada região e variável
+
+```{r}
+# Infinito igual a 0
+df[df == Inf] <- 0 
+
+df |>
+  select(regiao,ano_trim,dif_pct_gal:dif_pct_ovocons) |> 
+  group_by(regiao) |> 
+  summarise(across(where(is.numeric),mean, na.rm = T)) |> 
+  kable() |> 
+  kable_styling()
+```
+
+# Crescimento trimestre contra trimestre anterior
+
+## Galinhas Poedeiras
+
+Abaixo temos 5 gráficos mostrando o crescimento percentual comparado com o trimestre anterior.
+
+```{r fig.width=9}
+## Código para fazer o gráfico
+p1.co<-df %>%
+ filter(regiao %in% "Centro-Oeste") %>%
+ ggplot() +
+  aes(x = ano_trim, y = dif_pct_gal,fill=pos_gal) +
+  geom_col(position = "identity", colour = "black", size = 0.25) +
+  scale_fill_manual(values = c("tomato", "palegreen"), guide = FALSE) +
+  scale_x_discrete(guide = guide_axis(angle = 45)) +
+  ylab("%") +
+  xlab("") +
+  ggtitle("Centro-Oeste") +
+  theme_minimal()
+```
+
+```{r fig.width=9, echo=FALSE}
+p1.nd<-df %>%
+ filter(regiao %in% "Nordeste") %>%
+ ggplot() +
+  aes(x = ano_trim, y = dif_pct_gal,fill=pos_gal) +
+  geom_col(position = "identity", colour = "black", size = 0.25) +
+  scale_fill_manual(values = c("tomato", "palegreen"), guide = FALSE) +
+  scale_x_discrete(guide = guide_axis(angle = 45)) +
+  ylab("%") +
+  xlab("") +
+  ggtitle("Nordeste") +
+  theme_minimal()
+
+p1.nor<-df %>%
+ filter(regiao %in% "Norte") %>%
+ ggplot() +
+  aes(x = ano_trim, y = dif_pct_gal,fill=pos_gal) +
+  geom_col(position = "identity", colour = "black", size = 0.25) +
+  scale_fill_manual(values = c("tomato", "palegreen"), guide = FALSE) +
+  scale_x_discrete(guide = guide_axis(angle = 45)) +
+  ylab("%") +
+  xlab("") +
+  ggtitle("Norte") +
+  theme_minimal()
+
+p1.sd<-df %>%
+ filter(regiao %in% "Sudeste") %>%
+ ggplot() +
+  aes(x = ano_trim, y = dif_pct_gal,fill=pos_gal) +
+  geom_col(position = "identity", colour = "black", size = 0.25) +
+  scale_fill_manual(values = c("tomato", "palegreen"), guide = FALSE) +
+  scale_x_discrete(guide = guide_axis(angle = 45)) +
+  ylab("%") +
+  xlab("") +
+  ggtitle("Sudeste") +
+  theme_minimal()
+
+p1.sul<-df %>%
+ filter(regiao %in% "Sul") %>%
+ ggplot() +
+  aes(x = ano_trim, y = dif_pct_gal,fill=pos_gal) +
+  geom_col(position = "identity", colour = "black", size = 0.25) +
+  scale_fill_manual(values = c("tomato", "palegreen"), guide = FALSE) +
+  scale_x_discrete(guide = guide_axis(angle = 45)) +
+  ylab("%") +
+  xlab("") +
+  ggtitle("Sul") +
+  theme_minimal()
+
+```
+
+```{r fig.height=4,fig.width=8}
+p1.co
+```
+
+```{r fig.height=4,fig.width=8}
+p1.nd
+```
+
+```{r fig.height=4,fig.width=8}
+p1.nor
+```
+
+```{r fig.height=4,fig.width=8}
+p1.sd
+```
+
+```{r fig.height=4,fig.width=8}
+p1.sul
+```
+
+### Gráfico Interativo
+
+```{r}
+df %>% 
+  group_by(regiao) |> 
+  plot_time_series(data, dif_pct_gal,
+                   .facet_collapse = FALSE,
+                   .facet_ncol   = 3,
+                   .interactive = T,
+                   .title = "Gráfico Interativo")
+```
+
+## Quantidade de Ovos
+
+```{r fig.height=4,fig.width=8, echo = F}
+## Código para fazer o gráfico
+p1.co<-df %>%
+ filter(regiao %in% "Centro-Oeste") %>%
+ ggplot() +
+  aes(x = ano_trim, y = dif_pct_ovo,fill=pos_ovo) +
+  geom_col(position = "identity", colour = "black", size = 0.25) +
+  scale_fill_manual(values = c("tomato", "palegreen"), guide = FALSE) +
+  scale_x_discrete(guide = guide_axis(angle = 45)) +
+  ylab("%") +
+  xlab("") +
+  ggtitle("Centro-Oeste") +
+  theme_minimal()
+```
+
+```{r fig.height=4,fig.width=8, echo=F}
+p1.nd<-df %>%
+ filter(regiao %in% "Nordeste") %>%
+ ggplot() +
+  aes(x = ano_trim, y = dif_pct_ovo,fill=pos_ovo) +
+  geom_col(position = "identity", colour = "black", size = 0.25) +
+  scale_fill_manual(values = c("tomato", "palegreen"), guide = FALSE) +
+  scale_x_discrete(guide = guide_axis(angle = 45)) +
+  ylab("%") +
+  xlab("") +
+  ggtitle("Nordeste") +
+  theme_minimal()
+
+p1.nor<-df %>%
+ filter(regiao %in% "Norte") %>%
+ ggplot() +
+  aes(x = ano_trim, y = dif_pct_ovo,fill=pos_ovo) +
+  geom_col(position = "identity", colour = "black", size = 0.25) +
+  scale_fill_manual(values = c("tomato", "palegreen"), guide = FALSE) +
+  scale_x_discrete(guide = guide_axis(angle = 45)) +
+  ylab("%") +
+  xlab("") +
+  ggtitle("Norte") +
+  theme_minimal()
+
+p1.sd<-df %>%
+ filter(regiao %in% "Sudeste") %>%
+ ggplot() +
+  aes(x = ano_trim, y = dif_pct_ovo,fill=pos_ovo) +
+  geom_col(position = "identity", colour = "black", size = 0.25) +
+  scale_fill_manual(values = c("tomato", "palegreen"), guide = FALSE) +
+  scale_x_discrete(guide = guide_axis(angle = 45)) +
+  ylab("%") +
+  xlab("") +
+  ggtitle("Sudeste") +
+  theme_minimal()
+
+p1.sul<-df %>%
+ filter(regiao %in% "Sul") %>%
+ ggplot() +
+  aes(x = ano_trim, y = dif_pct_ovo,fill=pos_ovo) +
+  geom_col(position = "identity", colour = "black", size = 0.25) +
+  scale_fill_manual(values = c("tomato", "palegreen"), guide = FALSE) +
+  scale_x_discrete(guide = guide_axis(angle = 45)) +
+  ylab("%") +
+  xlab("") +
+  ggtitle("Sul") +
+  theme_minimal()
+
+```
+
+```{r fig.height=4,fig.width=8}
+p1.co
+```
+
+```{r fig.height=4,fig.width=8}
+p1.nd
+```
+
+```{r fig.height=4,fig.width=8}
+p1.nor
+```
+
+```{r fig.height=4,fig.width=8}
+p1.sd
+```
+
+```{r fig.height=4,fig.width=8}
+p1.sul
+```
+
+### Gráfico Interativo
+```{r}
+df %>% 
+  group_by(regiao) |> 
+  plot_time_series(data, dif_pct_ovo,
+                   .facet_collapse = FALSE,
+                   .facet_ncol   = 3,
+                   .interactive = T)
+```
+
+## Quantidade de Ovos Consumo
+
+```{r fig.height=4,fig.width=8, echo=FALSE}
+## Código para fazer o gráfico
+p1.co<-df %>%
+ filter(regiao %in% "Centro-Oeste") %>%
+  filter(ano_trim %in% c("2018-2", "2018-3", "2018-4", "2019-1", "2019-2", "2019-3", "2019-4", "2020-1", "2020-2", "2020-3", "2020-4", "2021-1")) |> 
+ ggplot() +
+  aes(x = ano_trim, y = dif_pct_ovocons,fill=pos_ovocons) +
+  geom_col(position = "identity", colour = "black", size = 0.25) +
+  scale_fill_manual(values = c("tomato", "palegreen"), guide = FALSE) +
+  scale_x_discrete(guide = guide_axis(angle = 45)) +
+  ylab("%") +
+  xlab("") +
+  ggtitle("Centro-Oeste") +
+  theme_minimal()
+```
+
+```{r fig.height=4,fig.width=8, echo = F}
+p1.nd<-df %>%
+ filter(regiao %in% "Nordeste") %>%
+  filter(ano_trim %in% c("2018-2", "2018-3", "2018-4", "2019-1", "2019-2", "2019-3", "2019-4", "2020-1", "2020-2", "2020-3", "2020-4", "2021-1")) |> 
+ ggplot() +
+  aes(x = ano_trim, y = dif_pct_ovocons,fill=pos_ovocons) +
+  geom_col(position = "identity", colour = "black", size = 0.25) +
+  scale_fill_manual(values = c("tomato", "palegreen"), guide = FALSE) +
+  scale_x_discrete(guide = guide_axis(angle = 45)) +
+  ylab("%") +
+  xlab("") +
+  ggtitle("Nordeste") +
+  theme_minimal()
+
+p1.nor<-df %>%
+ filter(regiao %in% "Norte") %>%
+  filter(ano_trim %in% c("2018-2", "2018-3", "2018-4", "2019-1", "2019-2", "2019-3", "2019-4", "2020-1", "2020-2", "2020-3", "2020-4", "2021-1")) |> 
+ ggplot() +
+  aes(x = ano_trim, y = dif_pct_ovocons,fill=pos_ovocons) +
+  geom_col(position = "identity", colour = "black", size = 0.25) +
+  scale_fill_manual(values = c("tomato", "palegreen"), guide = FALSE) +
+  scale_x_discrete(guide = guide_axis(angle = 45)) +
+  ylab("%") +
+  xlab("") +
+  ggtitle("Norte") +
+  theme_minimal()
+
+p1.sd<-df %>%
+ filter(regiao %in% "Sudeste") %>%
+  filter(ano_trim %in% c("2018-2", "2018-3", "2018-4", "2019-1", "2019-2", "2019-3", "2019-4", "2020-1", "2020-2", "2020-3", "2020-4", "2021-1")) |> 
+ ggplot() +
+  aes(x = ano_trim, y = dif_pct_ovocons,fill=pos_ovocons) +
+  geom_col(position = "identity", colour = "black", size = 0.25) +
+  scale_fill_manual(values = c("tomato", "palegreen"), guide = FALSE) +
+  scale_x_discrete(guide = guide_axis(angle = 45)) +
+  ylab("%") +
+  xlab("") +
+  ggtitle("Sudeste") +
+  theme_minimal()
+
+p1.sul<-df %>%
+ filter(regiao %in% "Sul") %>%
+  filter(ano_trim %in% c("2018-1","2018-2", "2018-3", "2018-4", "2019-1", "2019-2", "2019-3", "2019-4", "2020-1", "2020-2", "2020-3", "2020-4", "2021-1")) |> 
+ ggplot() +
+  aes(x = ano_trim, y = dif_pct_ovocons, fill = pos_ovocons) +
+  geom_col(position = "identity", colour = "black", size = 0.25) +
+  scale_fill_manual(values = c("tomato", "palegreen"), guide = FALSE) +
+  scale_x_discrete(guide = guide_axis(angle = 45)) +
+  ylab("%") +
+  xlab("") +
+  ggtitle("Sul") +
+  theme_minimal()
+
+```
+
+```{r fig.height=4,fig.width=8}
+p1.co
+```
+
+```{r fig.height=4,fig.width=8}
+p1.nd
+```
+
+```{r fig.height=4,fig.width=8}
+p1.nor
+```
+
+```{r fig.height=4,fig.width=8}
+p1.sd
+```
+
+```{r fig.height=4,fig.width=8}
+p1.sul
+```
+
+### Gráfico Interativo
+
+```{r}
+df %>% 
+  filter(data >="2018-01-01") |> 
+  plot_time_series(data, dif_pct_ovocons,
+                   .facet_collapse = FALSE,
+                   .facet_ncol   = 3,
+                   .y_lab = "%")
+```
+
+Abaixo podemos ver o boxplot de cada região olhando a porcentagem de variação em Ovos para consumo.
+
+É interessante reparar que no 3º Trimestre de 2019 a região Norte aumentou consideravelmente sua produção, e isso deve-se ao aumento de 40% de galinhas poedeiras.
+
+```{r}
+ggstatsplot::ggwithinstats(
+  df,
+  x = regiao,
+  y = dif_pct_ovocons,
+  type = "nonparametric",
+  outlier.tagging = T,
+  outlier.label = ano_trim,
+  sphericity.correction = FALSE,
+  pairwise.comparisons = F,
+  package = "yarrr",
+  palette = "info2",
+  title = "Boxplot: Região vs. % de variação trimestre a trimestre Ovo para Consumo",
+  xlab = "Região",
+  ylab = "Porcentagem no Trimestre"
+)
+```
+
+# Crescimento acumulado do período da produção
+
+A fórmula de crescimento médio acumulado é dada pela seguinte equação.
+
+$$CAGR = (\frac{VF}{VI})^{\frac{1}{n}}-1$$
+
+-   VF = Valor Final
+
+-   VI = Valor Inicial
+
+-   n = períodos em anos
+
+
+## CAGR - Galinhas Poedeiras
+
+```{r}
+df |> 
+  select(regiao,ano_trim,galinhas) |> 
+  filter(ano_trim %in% c("2015-1","2021-1")) |> 
+  group_by(regiao) |> 
+  summarise(CAGR = round(((lead(galinhas)/galinhas)^(1/6))-1,3)*100) |> 
+  drop_na() |> 
+  kable(format = "html",caption = "CAGR quantidade de galinha poedeira") |> kable_styling()
+```
+
+## CAGR - Quantidade Ovos
+
+```{r}
+df |> 
+  select(regiao,ano_trim,qt_ovo) |> 
+  filter(ano_trim %in% c("2015-1","2021-1")) |> 
+  group_by(regiao) |> 
+  summarise(CAGR = round(((lead(qt_ovo)/qt_ovo)^(1/6))-1,3)*100) |> 
+  drop_na() |> 
+  kable(format = "html",caption = "CAGR Quantidade de Ovo") |> kable_styling()
+```
+
+
+## CAGR - Quantidade Ovos Consumo
+
+```{r}
+df |> 
+  select(regiao,ano_trim,qt_ovo_cons) |> 
+  filter(ano_trim %in% c("2018-1","2021-1")) |> 
+  group_by(regiao) |> 
+  summarise(CAGR = round(((lead(qt_ovo_cons)/qt_ovo_cons)^(1/3))-1,3)*100) |> 
+  drop_na() |> 
+  kable(format = "html",caption="CAGR Quantidade de Ovo para consumo") |> kable_styling()
+```
+
+# Ovos por galinha
+
+Como a quantidade de ovos produzidos está em unidades de mil duzias, precisamos lembrar que:
+
+$$1\ Dúzia = 12 \ ovos$$ $$1000 \ Dúzias = 1000*12 = 12.000$$ Sendo assim é necessário criar uma variável de quantidade de ovos,
+
+$$ovos = quantidade*12000$$
+
+E assim cada galinha produziria,
+
+$$prod \ galinha = \frac{ovos}{galinhas}$$
+
+```{r}
+df <-
+  df |> 
+  mutate(n_ovos = qt_ovo * 12000,
+         galinha_ovo = n_ovos/galinhas)
+  
+```
+
+```{r fig.width=9, fig.height=5,echo=F}
+ggplot(df) +
+  aes(x = data, y = galinha_ovo, colour = regiao) +
+  geom_line(size = 1.5) +
+  scale_color_hue(direction = 1) +
+  labs(
+    x = "Data",
+    y = "Ovos produzidos por galinhas",
+    title = "Ovos produzidos por galinhas",
+    color = "Região"
+  ) +
+  theme_minimal() +
+  theme(plot.title = element_text(size = 15L, face = "bold"))
+```
+
+```{r}
+df %>% 
+  plot_time_series(data, galinha_ovo,
+                   .facet_collapse = FALSE,
+                   .facet_ncol   = 3,
+                   .y_lab = "%",
+                   .title = "Comportamento da produção de ovo por galinha no trimestre")
+```
+
+No boxplot abaixo podemos ver que há muita diferença na média de ovos que cada galinha produz no trimestre para cada região. A Região Sul possui a menor média, com 61.3 ovos por galinha. Já a região Nordeste possui uma das maiores médias e o menor desvio padrão dessa distribuição.
+A Região Norte possui a maior variação, mas uma média alta. Curioso perceber que no ano de 2020, no 3º e 4º Trimestre, a região Norte bateu a maior produção de ovos por galinha no trimestre, ultrapassando os 75 ovos por galinha no trimestre. 
+
+```{r}
+ggstatsplot::ggwithinstats(
+  df,
+  x = regiao,
+  y = galinha_ovo,
+  type = "nonparametric",
+  outlier.tagging = TRUE,
+  outlier.label = ano_trim,
+  outlier.coef = 1,
+  sphericity.correction = FALSE,
+  pairwise.comparisons = F,
+  package = "yarrr",
+  palette = "info2",
+  title = "Comparação entre produção de ovos por poedeiras durante o período de produção",
+  xlab = "Região",
+  ylab = "Ovos por galinha no trimestre"
+)
+```
+
+***
+
+# Tese de efeito de substituição de consumo de produtos mais caros
+
+Primeiramente vamos olhar para o Brasil, como se comporta a curva de crescimento de produção de ovo para consumo.
+
+```{r}
+df |> 
+  group_by(data) |> 
+  summarise(across(where(is.numeric),sum)) -> brasil
+
+brasil |> 
+  filter(data >="2017-12-01") |>
+  plot_time_series(data,qt_ovo_cons,
+                   .facet_collapse = FALSE,
+                   .facet_ncol   = 3,
+                   .title = "Brasil - Quantidade Ovo Consumo")
+```
+Podemos ver que do começo de 2018 para o meio do ano de 2020 houve um aumento considerável na produção de ovos para consumo.
+
+```{r}
+# Diferença Absoluta por Trimestre
+brasil <- 
+  brasil |> 
+  mutate(trim_dif_poed = galinhas - lag(galinhas),
+         trim_dif_ovo = qt_ovo - lag(qt_ovo),
+         trim_dif_ovocons = qt_ovo_cons - lag(qt_ovo_cons))
+
+# Taxa de crescimento em porcentagem
+brasil <-
+  brasil |> 
+  mutate(
+    dif_pct_gal = (trim_dif_poed/lag(galinhas))*100,
+    dif_pct_ovo = (trim_dif_ovo/lag(qt_ovo)*100),
+    dif_pct_ovocons = (trim_dif_ovocons / lag(qt_ovo_cons)*100))
+
+# Boolean para cor da barra
+brasil <-
+  brasil |> 
+  mutate(pos_gal = dif_pct_gal >= 0,
+         pos_ovo = dif_pct_ovo >= 0,
+         pos_ovocons = dif_pct_ovocons >=0)
+
+brasil[brasil == Inf] <- 0 
+```
+
+
+
+### Tabela crescimento em porcentagem trimestre a trimestre no Brasil
+```{r}
+brasil |> 
+  filter(data >= "2018-01-01") |> 
+  select(data,dif_pct_ovocons) |> 
+  kable() |> 
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"))
+```
+No gráfico abaixo, podemos ver que a produção no primeiro trimestre de 2020 foi menor do que a do trimestre passado, porém nos trimestres seguidos, ela aumenta consideravelmente, para então, no último trimestre ela decrescer 3.5%.
+
+```{r}
+brasil |> 
+  filter(data >="2018-01-01") |>
+  plot_time_series(data,dif_pct_ovocons,
+                   .facet_collapse = FALSE,
+                   .facet_ncol   = 3,
+                   .y_lab = "%",
+                   .title = "Brasil - Porcentagem de variação trimestre (Ovo Consumo)")
+```
+
+Apesar de algumas regiões estarem com tendência de crescimento, como o Nordeste e o Centro-Oeste, há uma evidente tendência de descrescimento na produção de ovos para consumo no Brasil. No ano de 2020, o Brasil bateu recorde de produção de ovos, e apesar de agora no final de 2020 e 1º trimestre de 2021 a produção ter diminuido um pouco, ela se mantém em alta.
+Dessa forma, olhando apenas os dados, podemos corroborar com a tese de efeito de substituição de consumo de produtos mais caros (carne bovina por exemplo) para o ovo.
+
+Como sugestão de análise, poderíamos fazer uma análise mais completa utilizando dados de consumo de carne bovina e outras fontes de proteínas e também utilizar indices de inflação nos produtos alimentícios para uma contribuição mais inferencial para a tese.
+
+
+
+
